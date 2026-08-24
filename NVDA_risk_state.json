@@ -1,0 +1,51 @@
+{
+  "ticker": "NVDA",
+  "price_data": {
+    "raw": [
+      {
+        "type": "text",
+        "text": "{\n  \"symbol\": \"NVDA\",\n  \"last_price\": 214.72,\n  \"previous_close\": 217.05,\n  \"currency\": \"USD\"\n}",
+        "id": "lc_117cb709-dacb-47ab-8cce-844258dfb811"
+      }
+    ]
+  },
+  "fundamentals": {
+    "raw": [
+      {
+        "type": "text",
+        "text": "{\n  \"symbol\": \"NVDA\",\n  \"company_name\": \"NVIDIA Corporation\",\n  \"forward_pe\": 16.482347,\n  \"trailing_pe\": 32.88208,\n  \"profit_margins\": 0.62966,\n  \"revenue_growth\": 0.852,\n  \"total_debt_to_equity\": 6.555,\n  \"market_cap\": 5200733011968\n}",
+        "id": "lc_3cff7fed-733c-4d10-8132-0497a9d7d088"
+      }
+    ]
+  },
+  "risk_metrics": {
+    "raw": [
+      {
+        "type": "text",
+        "text": "{\n  \"symbol\": \"NVDA\",\n  \"annualized_volatility\": 0.3677,\n  \"beta_vs_benchmark\": 1.887,\n  \"benchmark\": \"^GSPC\",\n  \"max_drawdown_1y\": -0.2021,\n  \"value_at_risk_95_daily\": -0.0378,\n  \"trading_days_used\": 250\n}",
+        "id": "lc_e52126f7-d859-4f20-a071-75ad4b8d9e96"
+      }
+    ]
+  },
+  "liquidity": {
+    "raw": [
+      {
+        "type": "text",
+        "text": "{\n  \"symbol\": \"NVDA\",\n  \"avg_daily_volume_1mo\": 116840657.0,\n  \"shares_outstanding\": 24221000000,\n  \"float_shares\": 23226192000,\n  \"short_percent_of_float\": 0.0126\n}",
+        "id": "lc_6869c3a0-87cd-4083-8709-ec515893d096"
+      }
+    ]
+  },
+  "news": [
+    {
+      "type": "text",
+      "text": "No search results were found.",
+      "id": "lc_bdfe5ea1-6a59-4dd1-b872-1afe01f41fa8"
+    }
+  ],
+  "risk_score": 0.0,
+  "risk_flags": [],
+  "requires_deep_dive": false,
+  "report": "### Overall Risk Verdict\nNVIDIA Corporation (NVDA) currently presents a low overall risk score of 0.0 out of 100, indicating a stable investment profile with minimal immediate risks. The absence of risk flags further reinforces the company's strong position in the market, suggesting that it is well-managed and resilient against potential financial threats.\n\n### What is Driving the Score\nThe favorable risk score is primarily driven by NVDA's robust fundamentals, including a high profit margin of 62.97% and significant revenue growth of 85.2%. While the trailing P/E ratio of 32.88 suggests that the stock may be overvalued relative to its earnings, the forward P/E of 16.48 indicates a more attractive valuation looking ahead. The company's total debt-to-equity ratio of 6.56 is a point of concern, but it is offset by strong operational performance and market capitalization of approximately $5.2 trillion.\n\n### Concentration/Liquidity Concerns\nLiquidity metrics for NVDA are strong, with an average daily trading volume of approximately 116.84 million shares and a relatively low short percent of float at 1.26%. This indicates that the stock is actively traded and that there is sufficient liquidity for investors to enter and exit positions without significant price impact. The shares outstanding and float shares further support a healthy trading environment, minimizing concentration risks.\n\n### One-Line Investor Takeaway\nNVIDIA Corporation represents a low-risk investment opportunity characterized by strong fundamentals and robust liquidity, making it an attractive option for investors seeking stability in the tech sector.",
+  "errors": []
+}

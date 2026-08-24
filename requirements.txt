@@ -1,0 +1,12 @@
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+pydantic==2.10.3
+python-dotenv==1.0.1
+certifi==2024.12.14
+langchain-openai==0.2.14
+langchain-mcp-adapters==0.0.5
+langgraph==0.2.60
+mcp==1.1.2
+yfinance==0.2.50
+numpy==1.26.4
+ddgs==9.0.0
