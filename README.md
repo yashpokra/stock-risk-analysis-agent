@@ -263,25 +263,6 @@ A normal completion returns `status: "completed"` and the collected analysis sta
 - If a report has limited research, treat that as limited evidence, not proof that no corporate event exists.
 - Yahoo Finance data can be delayed, incomplete, unavailable for delisted symbols, or revised. The UI exposes unavailable values as `-` and flags missing core data.
 
-## Confidentiality Audit
 
-Before adding this README and screenshots, the repository was checked for common accidental credential exposure:
-
-- `.env` is ignored by `.gitignore`.
-- `.venv/`, `node_modules/`, `dist/`, Python caches, and `*.log` files are ignored.
-- The tracked Git history contains no `.env`, private-key file, credential file, or common API-key/password pattern.
-- `NVDA_risk_state.json` contains public market-analysis output and generated report text, not credentials.
-- The six screenshots contain UI and public stock/research information; no API key, token, password, or private key is visible.
-
-This is a repository-content audit, not a guarantee about credentials that may exist in local shell history, external services, or other untracked files. Before future pushes, run:
-
-```powershell
-git status --short
-git grep -n -I -E 'sk-[A-Za-z0-9]{20,}|BEGIN (RSA|OPENSSH|EC) PRIVATE KEY|OPENAI_API_KEY[=:][^$\{[:space:]]+|password[=:][^$\{[:space:]]+' HEAD
-```
-
-If a real secret is ever committed, revoke it immediately, remove it from the current files, and rotate it with the provider. Removing a string from the latest commit alone does not remove it from Git history.
-
-## Disclaimer
 
 This project is for software demonstration, research organization, and comparative risk analysis. It does not provide personalized investment advice, a recommendation to buy or sell, or a guarantee about future performance. Verify important financial, legal, and listing information with authoritative sources.
