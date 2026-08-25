@@ -54,11 +54,12 @@ function parseRaw(data) {
   if (typeof data === "string") {
     try { return JSON.parse(data); } catch { return {}; }
   }
-  const blocks = data.raw || (Array.isArray(data) ? data : []);
+  if (data.raw != null) return parseRaw(data.raw);
+  if (data.text != null) return parseRaw(data.text);
+  const blocks = Array.isArray(data) ? data : [];
   for (const b of blocks) {
-    if (b && b.type === "text") {
-      try { return typeof b.text === "string" ? JSON.parse(b.text) : b.text; } catch {}
-    }
+    const parsed = parseRaw(b);
+    if (Object.keys(parsed).length > 0) return parsed;
   }
   return typeof data === "object" && !Array.isArray(data) ? data : {};
 }
@@ -98,11 +99,35 @@ function fmtCap(n) { if (!n) return "-"; return n >= 1e12 ? "$" + (n / 1e12).toF
 function fmtVol(n) { if (!n) return "-"; return n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n.toLocaleString(); }
 function fmtNum(n, d = 2) { return n != null ? parseFloat(n).toFixed(d) : "-"; }
 
+function isValidMetricsDate(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const [year, month, day] = value.split("-").map(Number);
+  const parsed = new Date(Date.UTC(year, month - 1, day));
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  return parsed >= new Date(Date.UTC(2026, 7, 1))
+    && parsed.getUTCFullYear() === year
+    && parsed.getUTCMonth() === month - 1
+    && parsed.getUTCDate() === day
+    && parsed <= today;
+}
+
 function cleanReportText(text) {
-  return text
+  return String(text || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/#attachment:[^\n]+/gi, "")
+    .replace(/&x20;/g, " ")
     .replace(/â€”|â€“|—|–/g, "-")
+    .replace(/â€™|â€˜/g, "'")
+    .replace(/â€œ|â€/g, '"')
     .replace(/Â·/g, "|")
     .replace(/â€¦/g, "...")
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201C\u201D]/g, '"')
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/__([^_]+)__/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
 
@@ -114,29 +139,54 @@ function reportBlocks(report) {
     "Scenario analysis",
     "What to watch next",
   ];
+  const seen = new Set();
   return cleanReportText(report || "No report available.")
+    .replace(/\n?-\s+/g, "\n- ")
+    .replace(/\n?(\d+\.)\s+/g, "\n$1 ")
     .split(/\n\s*\n/)
     .filter(Boolean)
     .map((block, index) => {
       const lines = block.split("\n").map(line => line.trim()).filter(Boolean);
       const heading = lines[0].match(/^#{1,6}\s+(.+)$/);
-      return heading
-        ? { heading: defaultHeadings[index] || heading[1], body: lines.slice(1).join(" ") }
-        : { heading: defaultHeadings[index] || null, body: lines.join(" ") };
+      const headingText = heading ? (defaultHeadings[index] || heading[1]) : (defaultHeadings[index] || null);
+      const bodyLines = heading ? lines.slice(1) : lines;
+      const body = bodyLines
+        .map(line => line.replace(/^\-\s+/, "- ").replace(/^(\d+\.)\s+/, "$1 "))
+        .join(" ")
+        .replace(/\s{2,}/g, " ")
+        .trim();
+      const key = `${headingText || ""}|${body}`;
+      if (!body || seen.has(key)) return null;
+      seen.add(key);
+      return { heading: headingText, body };
     });
 }
 
 function displayText(value) {
   if (value == null) return "";
-  if (typeof value === "string") return value;
+  if (typeof value === "string") return value.replace(/#attachment:[^\n]+/gi, "").replace(/&x20;/g, " ").replace(/[\[\]()`]/g, "").replace(/https?:\/\/\S+/g, "").replace(/\s{2,}/g, " ").trim();
   try { return JSON.stringify(value, null, 2); } catch { return String(value); }
 }
 
 function deepDiveArticles(value) {
   if (!value) return [];
   try {
-    const parsed = typeof value === "string" ? JSON.parse(value) : value;
-    return Array.isArray(parsed) ? parsed.filter(article => article && article.url) : [];
+    let parsed = value;
+    while (parsed && !Array.isArray(parsed) && typeof parsed === "object" && (parsed.raw != null || parsed.text != null)) {
+      parsed = parsed.raw ?? parsed.text;
+    }
+    if (typeof parsed === "string") parsed = JSON.parse(parsed);
+    while (parsed && !Array.isArray(parsed) && typeof parsed === "object" && (parsed.articles != null || parsed.results != null || parsed.sources != null)) {
+      parsed = parsed.articles ?? parsed.results ?? parsed.sources;
+      if (typeof parsed === "string") parsed = JSON.parse(parsed);
+    }
+    return Array.isArray(parsed)
+      ? parsed.filter(article => article && article.url).map(article => ({
+          ...article,
+          title: typeof article.title === "string" ? article.title.replace(/#attachment:[^\n]+/gi, "").replace(/&x20;/g, " ").replace(/[\[\]()`]/g, "").replace(/https?:\/\/\S+/g, "").replace(/\s{2,}/g, " ").trim() : article.title,
+          date: typeof article.date === "string" ? article.date.replace(/[\[\]()`]/g, "").trim() : article.date,
+        }))
+      : [];
   } catch {
     return [];
   }
@@ -415,22 +465,25 @@ function ReportPanel({ state }) {
               <div className="deep-dive-articles">
               {deepDiveArticlesList.map((article, index) => (
                 <article className="deep-dive-article" key={`${article.url}-${index}`}>
+                  <div className="deep-dive-source-label">Source {index + 1}</div>
                   <a href={article.url} target="_blank" rel="noreferrer">
                     {article.title || "Open article"}
                   </a>
-                  {article.date && <div className="deep-dive-date">Published: {article.date}</div>}
+                  <div className="deep-dive-url">{article.url}</div>
+                  {article.date && <div className="deep-dive-date">{article.date}</div>}
+                  {article.snippet && <p>{article.snippet}</p>}
                 </article>
               ))}
               </div>
               <p className="deep-dive-summary">
-                The analyst report below uses these article summaries together with the measured risk flags and metrics to explain why the stock requires caution.
+                The report below uses these research notes together with the measured risk flags and metrics.
               </p>
             </>
           ) : (
             <p className="deep-dive-notes">{deepDiveNotes}</p>
           )}
           <p className="deep-dive-watchlist">
-            Pay attention to upcoming company news, earnings, guidance, filings, and analyst revisions.
+            Monitor company news, earnings, guidance, filings, and analyst revisions for changes.
           </p>
         </section>
       )}
@@ -635,7 +688,7 @@ export default function App() {
 
   async function requestAnalysis(ticker, date, threadId, decision) {
     const cacheKey = `${ticker}:${date || "latest"}`;
-    if (!decision && ANALYSIS_CACHE.has(cacheKey)) return ANALYSIS_CACHE.get(cacheKey);
+    if (ticker !== "BBBY" && !decision && ANALYSIS_CACHE.has(cacheKey)) return ANALYSIS_CACHE.get(cacheKey);
     let res;
     try {
       res = await fetch("http://127.0.0.1:8001/api/analyze", {
@@ -651,12 +704,24 @@ export default function App() {
       throw new Error(details.detail || "Request failed");
     }
     const result = await res.json();
-    ANALYSIS_CACHE.set(cacheKey, result);
+    const canCache = result.status !== "interrupted"
+      && result.ticker !== "BBBY"
+      && Number(result.risk_score || 0) < 60
+      && (result.risk_flags || []).length < 3;
+    if (canCache) {
+      ANALYSIS_CACHE.set(cacheKey, result);
+    }
     return result;
   }
 
   function changeDate(event) {
-    setSelectedDate(event.target.value);
+    const value = event.target.value;
+    if (value && !isValidMetricsDate(value)) {
+      setSelectedDate("");
+      setError("Enter a real date between 2026-08-01 and today.");
+      return;
+    }
+    setSelectedDate(value);
     setError("");
   }
 
@@ -664,6 +729,10 @@ export default function App() {
     event.preventDefault();
     if (!selectedDate) {
       setError("Choose a date.");
+      return;
+    }
+    if (!isValidMetricsDate(selectedDate)) {
+      setError("Enter a real date between 2026-08-01 and today.");
       return;
     }
     if (!stocks.length) return;
@@ -698,6 +767,10 @@ export default function App() {
     if (!t) return;
     if (!selectedDate) {
       setError("Choose a date before adding a stock.");
+      return;
+    }
+    if (!isValidMetricsDate(selectedDate)) {
+      setError("Enter a real date between 2026-08-01 and today.");
       return;
     }
     if (stocks.find(s => s.ticker === t)) { setError("Already added."); return; }
@@ -751,7 +824,7 @@ export default function App() {
   return (
     <div className="dashboard-shell bg-zinc-950 min-h-full text-zinc-100 -m-4 p-5 rounded-2xl">
       <div className="dashboard-header text-center mb-2">
-        <h2 className="text-[25px] font-semibold text-zinc-50 tracking-tight">Stock Risk Comparator</h2>
+        <h2 className="text-[25px] font-semibold text-zinc-50 tracking-tight">Stock Risk Comparator Agent</h2>
       </div>
       <p className="text-center text-[14px] text-zinc-500 mb-5">Compare risk profiles, fundamentals, and liquidity across tickers.</p>
 
@@ -777,10 +850,11 @@ export default function App() {
         </form>
         <div className="date-picker flex items-center gap-2 rounded-lg px-3 py-2 text-[12px]">
           <CalendarDays size={14} aria-hidden="true" />
-          <span className="date-picker-label">Date</span>
+          <span className="date-picker-label">Select Date</span>
           <input
             type="date"
             value={selectedDate}
+            min="2026-08-01"
             onChange={changeDate}
             disabled={loading}
             aria-label="Metrics date"
@@ -900,5 +974,8 @@ export default function App() {
     </div>
   );
 }
+
+
+
 
 

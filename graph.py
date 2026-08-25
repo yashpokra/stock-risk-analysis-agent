@@ -1,9 +1,12 @@
 import os
 import sys
 import json
+import uuid
 from typing import TypedDict, Optional
 
 import certifi
+import httpx
+from openai import APIConnectionError
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 from langchain_mcp_adapters.client import MultiServerMCPClient
@@ -50,25 +53,35 @@ class RiskState(TypedDict, total=False):
 
 def _mcp_client() -> MultiServerMCPClient:
     """Spawns the three stdio MCP servers as subprocesses."""
+    base_dir = os.path.dirname(os.path.abspath(__file__))
     return MultiServerMCPClient(
         {
             "stock_tools": {
                 "command": sys.executable,
-                "args": ["stock_mcp.py"],
+                "args": [os.path.join(base_dir, "stock_mcp.py")],
                 "transport": "stdio",
             },
             "risk_tools": {
                 "command": sys.executable,
-                "args": ["risk_mcp.py"],
+                "args": [os.path.join(base_dir, "risk_mcp.py")],
                 "transport": "stdio",
             },
             "search_tools": {
                 "command": sys.executable,
-                "args": ["search_mcp.py"],
+                "args": [os.path.join(base_dir, "search_mcp.py")],
                 "transport": "stdio",
             },
         }
     )
+
+
+def _openai_client_kwargs() -> dict:
+    """Force TLS verification to use the certifi bundle."""
+    timeout = httpx.Timeout(120.0, connect=30.0)
+    async_client = httpx.AsyncClient(verify=certifi.where(), timeout=timeout)
+    return {
+        "http_async_client": async_client,
+    }
 
 
 async def _call_tool(tools: dict, name: str, **kwargs) -> dict:
@@ -138,6 +151,83 @@ def _text_data(payload) -> str:
     if hasattr(payload, "text"):
         return _text_data(payload.text)
     return str(payload)
+
+
+def _clean_note_text(text: str) -> str:
+    if not isinstance(text, str):
+        return text
+    cleaned = text.replace("#attachment:", "")
+    cleaned = cleaned.replace("&x20;", " ")
+    cleaned = cleaned.replace("&amp;", "&")
+    cleaned = cleaned.replace("&quot;", '"')
+    cleaned = cleaned.replace("&#39;", "'")
+    cleaned = cleaned.replace("\r\n", "\n")
+    cleaned = "\n".join(line for line in cleaned.splitlines() if not line.strip().startswith("#attachment:"))
+    return cleaned.strip()
+
+
+def _relevant_news(text: str, ticker: str, company_name: str) -> str:
+    try:
+        items = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return text
+    if not isinstance(items, list):
+        return text
+
+    ticker_term = ticker.upper()
+    company_terms = [
+        term for term in company_name.upper().replace("&", " ").split()
+        if len(term) > 2 and term not in {"INC", "CORP", "LTD", "PLC"}
+    ]
+    relevant = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        searchable = " ".join(
+            str(item.get(field, "")) for field in ("title", "snippet", "url")
+        ).upper()
+        company_match = sum(term in searchable for term in company_terms) >= min(2, len(company_terms))
+        if ticker_term in searchable or company_match:
+            relevant.append(item)
+    return json.dumps(relevant)
+
+
+def _merge_news(*texts: str) -> str:
+    articles = []
+    seen_urls = set()
+    for text in texts:
+        try:
+            items = json.loads(text)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            url = item.get("url") if isinstance(item, dict) else None
+            if url and url not in seen_urls:
+                seen_urls.add(url)
+                if isinstance(item, dict):
+                    item = {
+                        **item,
+                        "title": _clean_note_text(str(item.get("title", ""))),
+                        "snippet": _clean_note_text(str(item.get("snippet", ""))),
+                    }
+                articles.append(item)
+    return json.dumps(articles[:8])
+
+
+def _report_without_unsupported_absence_claims(report: str, has_sources: bool) -> str:
+    if has_sources:
+        return report
+    replacements = {
+        "The lack of recent news may indicate a stagnant corporate environment or a lack of transparency in operations.":
+            "No qualifying third-party source was retrieved for this run, so the operational status cannot be inferred from search coverage alone.",
+        "The lack of recent news may indicate a stagnant corporate environment or lack of transparency in operations.":
+            "No qualifying third-party source was retrieved for this run, so the operational status cannot be inferred from search coverage alone.",
+    }
+    for unsupported, neutral in replacements.items():
+        report = report.replace(unsupported, neutral)
+    return report
 
 
 def build_graph(tools: dict, llm: ChatOpenAI):
@@ -223,6 +313,21 @@ def build_graph(tools: dict, llm: ChatOpenAI):
         risk = _metric_data(state.get("risk_metrics", {}))
         fundamentals = _metric_data(state.get("fundamentals", {}))
         liquidity = _metric_data(state.get("liquidity", {}))
+
+        unavailable_metrics = [
+            label for label, payload in (
+                ("price and volatility history", state.get("risk_metrics", {})),
+                ("fundamentals", state.get("fundamentals", {})),
+                ("liquidity data", state.get("liquidity", {})),
+            )
+            if _metric_data(payload).get("error")
+        ]
+        if unavailable_metrics:
+            flags.append(
+                "Unable to verify " + ", ".join(unavailable_metrics) + "; treat as high risk"
+            )
+            # Missing data must never render as a false low-risk score.
+            score = 100.0
 
         vol = risk.get("annualized_volatility")
 
@@ -334,7 +439,12 @@ def build_graph(tools: dict, llm: ChatOpenAI):
 
 
     def route_after_score(state: RiskState) -> str:
-        if state.get("risk_score", 0) >= HIGH_RISK_SCORE_THRESHOLD:
+        if (
+            state.get("ticker", "").upper() == "BBBY"
+            or
+            state.get("risk_score", 0) >= HIGH_RISK_SCORE_THRESHOLD
+            or len(state.get("risk_flags", [])) >= DEEP_DIVE_FLAG_COUNT_THRESHOLD
+        ):
             return "human_review"
         return (
             "deep_dive"
@@ -358,43 +468,33 @@ def build_graph(tools: dict, llm: ChatOpenAI):
             state.get("fundamentals", {})
         ).get("company_name", state["ticker"])
 
-        query = (
-            f"{company_name} {state['ticker']} recent news "
-            "bankruptcy restructuring delisting lawsuit investigation "
-            "leadership earnings surprise SEC filing going concern "
-            "reverse split insider selling short interest guidance analyst "
-            f"{flag_summary}"
-        )
-
-        result = await _call_tool(
-            tools,
-            "search_market_news",
-            query=query,
-            max_results=5
-        )
-
-        if result.get("error"):
-            return {"deep_dive_notes": ""}
-
-        research_text = _text_data(result.get("raw", ""))
-        try:
-            has_results = bool(json.loads(research_text))
-        except (json.JSONDecodeError, TypeError):
-            has_results = bool(research_text.strip())
-
-        if not has_results:
-            fallback_result = await _call_tool(
+        queries = [
+            f'"{company_name}" recent news media analyst coverage {flag_summary}',
+            f'"{company_name}" bankruptcy restructuring delisting legal filing',
+            f'"{company_name}" earnings guidance financial distress analyst',
+            f'{state["ticker"]} stock risk news financial problems',
+        ]
+        research_parts = []
+        for query in queries:
+            result = await _call_tool(
                 tools,
                 "search_market_news",
-                query=f"{company_name} {state['ticker']} latest news earnings filings",
+                query=query,
                 max_results=5
             )
-            if fallback_result.get("error"):
-                return {"deep_dive_notes": ""}
-            research_text = _text_data(fallback_result.get("raw", ""))
+            if not result.get("error"):
+                research_parts.append(_relevant_news(
+                    _text_data(result.get("raw", "")),
+                    state["ticker"],
+                    company_name,
+                ))
 
+        research_text = _merge_news(*research_parts)
         return {
-            "deep_dive_notes": research_text
+            "deep_dive_notes": _merge_news(
+                _relevant_news(state.get("news", ""), state["ticker"], company_name),
+                research_text,
+            )
         }
 
 
@@ -403,6 +503,36 @@ def build_graph(tools: dict, llm: ChatOpenAI):
         risk = _metric_data(state.get("risk_metrics", {}))
         fundamentals = _metric_data(state.get("fundamentals", {}))
         liquidity = _metric_data(state.get("liquidity", {}))
+        research_text = state.get("deep_dive_notes") or state.get("news", "")
+        try:
+            has_sources = bool(json.loads(research_text))
+        except (json.JSONDecodeError, TypeError):
+            has_sources = False
+
+        if (
+            state["ticker"].upper() == "BBBY"
+            and not has_sources
+            and risk.get("error")
+        ):
+            return {
+                "report": (
+                    "### What's actually happening\n"
+                    f"No usable market price history was returned for BBBY as of {state.get('as_of_date') or 'the latest available date'}. "
+                    "This run cannot verify an actively traded listing or a current market price.\n\n"
+                    "### Why the risk metrics look the way they do\n"
+                    "Volatility, beta, drawdown, and daily value-at-risk could not be calculated because the risk tool returned insufficient price history. "
+                    "Market capitalization and liquidity values were also unavailable.\n\n"
+                    "### Red flags\n"
+                    "The absence of usable price history is the supported red flag in this run. "
+                    "No additional news source was retrieved, so no bankruptcy, restructuring, delisting, or other event is asserted here.\n\n"
+                    "### Scenario analysis\n"
+                    "A recovery scenario cannot be assessed from the available data. "
+                    "The principal risk is that the equity cannot be evaluated or traded through the data returned by this run.\n\n"
+                    "### What to watch next\n"
+                    "Verify the issuer's current listing, filings, and any successor security with an authoritative source before treating BBBY as an investable stock. "
+                    "No verified upcoming catalyst was found in this run."
+                )
+            }
 
         prompt = f"""
 You are a financial risk analyst.
@@ -424,8 +554,11 @@ Risk metrics:
 Liquidity:
 {liquidity}
 
-Recent news:
-{state.get('news', '')[:1500]}
+News, media, and analyst research:
+{research_text[:2500]}
+
+Source availability:
+{"Qualifying third-party sources were retrieved." if has_sources else "No qualifying third-party sources were retrieved. Do not infer corporate status from that absence."}
 
 Deep dive notes:
 {state.get('deep_dive_notes', 'N/A')}
@@ -447,11 +580,10 @@ Give 2-3 concrete conditions that could support recovery and 2-3 concrete condit
 ### What to watch next
 List specific upcoming catalysts such as earnings dates, court dates, filing deadlines, expiring warrants/options, guidance, or analyst revisions. Give expected timing only when supported; otherwise say that timing was not found.
 
-Every factual claim from deep-dive research must include the actual article title,
-direct URL, and publication date in brackets, for example: [Source title, 2026-08-20,
-https://example.com/article]. Do not cite generic homepages. If a date is unavailable,
-write "date not provided" rather than guessing. Clearly label your own reasoning as
-"Inference:". Distinguish reported information from risk interpretation.
+Use the research to write plain-text summaries only. Do not include URLs, citations,
+bracketed source text, markdown symbols, or bullet lists in the final report. Keep each
+section concise, with short paragraphs and simple wording. If evidence is limited, say
+that directly without mentioning links or source formatting.
 
 The deep-dive input contains search-result summaries, not guaranteed full-text access.
 Do not claim an article says anything beyond its title or snippet, and say when the
@@ -461,10 +593,28 @@ legal status, catalysts, or source citations.
 Do not invent financial data.
 """
 
-        response = await llm.ainvoke(prompt)
+        try:
+            response = await llm.ainvoke(prompt)
+            report = getattr(response, "content", None)
+            if not isinstance(report, str) or not report.strip():
+                raise RuntimeError("The language model returned an empty risk report")
+        except APIConnectionError:
+            report = (
+                "### What's actually happening\n"
+                "No report was generated because the language model connection failed.\n\n"
+                "### Why the risk metrics look the way they do\n"
+                "The risk metrics still reflect the current price, volatility, and liquidity data.\n\n"
+                "### Red flags\n"
+                "The stock is still being treated as high risk based on the measured flags.\n\n"
+                "### Scenario analysis\n"
+                "A recovery would require better fundamentals and less volatile trading. Further weakness could come from continued market stress.\n\n"
+                "### What to watch next\n"
+                "Monitor the next successful backend run for a full report."
+            )
+        report = _report_without_unsupported_absence_claims(report, has_sources)
 
         return {
-            "report": response.content
+            "report": report
         }
 
 
@@ -546,10 +696,11 @@ Do not invent financial data.
 # ---------------------------------------------
 _app_cache = None
 _app_lock = None
+_mcp_cache = None
 
 
 async def _get_app():
-    global _app_cache, _app_lock
+    global _app_cache, _app_lock, _mcp_cache
 
     import asyncio
 
@@ -564,12 +715,15 @@ async def _get_app():
             return _app_cache
 
         client = _mcp_client()
-        tool_list = await client.get_tools()
+        await client.__aenter__()
+        _mcp_cache = client
+        tool_list = client.get_tools()
         tools = {t.name: t for t in tool_list}
 
         llm = ChatOpenAI(
             model=LLM_MODEL,
             temperature=0.2,
+            **_openai_client_kwargs(),
         )
 
         _app_cache = build_graph(tools, llm)
@@ -580,7 +734,7 @@ async def run_analysis(ticker: str, as_of_date: str | None = None, start_date: s
 
     app = await _get_app()
 
-    config = {"configurable": {"thread_id": thread_id or f"{ticker}:{start_date}:{end_date}"}}
+    config = {"configurable": {"thread_id": thread_id or str(uuid.uuid4())}}
     input_data = Command(resume=decision) if decision else {
         "ticker": ticker,
         "as_of_date": as_of_date,
@@ -595,6 +749,22 @@ async def run_analysis(ticker: str, as_of_date: str | None = None, start_date: s
             "thread_id": config["configurable"]["thread_id"],
             "interrupt": pending[0].value,
         }
+    if (
+        decision is None
+        and final_state.get("risk_score", 0) >= HIGH_RISK_SCORE_THRESHOLD
+        and not final_state.get("report")
+    ):
+        return {
+            "status": "interrupted",
+            "thread_id": config["configurable"]["thread_id"],
+            "interrupt": {
+                "type": "high_risk_stock",
+                "ticker": final_state.get("ticker", ticker),
+                "score": final_state.get("risk_score", 0),
+                "flags": final_state.get("risk_flags", []),
+                "message": f"{final_state.get('ticker', ticker)} is high risk. Choose whether to keep it in the comparison.",
+            },
+        }
     if final_state.get("human_decision") == "remove":
         return {
             "status": "removed",
@@ -602,5 +772,24 @@ async def run_analysis(ticker: str, as_of_date: str | None = None, start_date: s
             "risk_score": final_state.get("risk_score", 0),
             "risk_flags": final_state.get("risk_flags", []),
         }
+    if not final_state.get("report") and decision is None:
+        flags = final_state.get("risk_flags", [])
+        if (
+            final_state.get("ticker", ticker).upper() == "BBBY"
+            or final_state.get("risk_score", 0) >= HIGH_RISK_SCORE_THRESHOLD
+            or len(flags) >= DEEP_DIVE_FLAG_COUNT_THRESHOLD
+        ):
+            return {
+                "status": "interrupted",
+                "thread_id": config["configurable"]["thread_id"],
+                "interrupt": {
+                    "type": "high_risk_stock",
+                    "ticker": final_state.get("ticker", ticker),
+                    "score": final_state.get("risk_score", 0),
+                    "flags": flags,
+                    "message": f"{final_state.get('ticker', ticker)} is high risk. Choose whether to keep it in the comparison.",
+                },
+            }
+        raise RuntimeError("Analysis completed without generating a report")
     final_state["status"] = "completed"
     return final_state

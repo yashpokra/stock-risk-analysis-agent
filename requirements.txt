@@ -4,9 +4,11 @@ pydantic==2.10.3
 python-dotenv==1.0.1
 certifi==2024.12.14
 langchain-openai==0.2.14
+langchain==0.3.14
 langchain-mcp-adapters==0.0.5
 langgraph==0.2.60
 mcp==1.4.1
-yfinance==0.2.50
+yfinance==1.6.0
+protobuf==7.36.0
 numpy==1.26.4
 ddgs==9.0.0
